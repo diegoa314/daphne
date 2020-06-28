@@ -322,29 +322,22 @@ _io = [
         Subsignal("n", Pins("AF11")),
         IOStandard("LVCMOS25")
     ),
-    ("gtp_refclk", 0,
+    ("gtp_clk", 0,
         Subsignal("p", Pins("AA11")),
         Subsignal("n", Pins("AB11"))
     ),
 
-    ("din",0, 
-        Subsignal("a", Pins("X")),
-        Subsignal("b", Pins("X")),
-        Subsignal("c", Pins("X")),
-        Subsignal("d", Pins("X")),
-        Subsignal("e", Pins("X")),
-        Subsignal("f", Pins("X")),
-        Subsignal("g", Pins("X")),
-        Subsignal("h", Pins("X"))
-    ),
-    ("dtin",0, 
-        Subsignal("a", Pins("X")),
-        Subsignal("b", Pins("X"))
-    ),
-    ("re",0, Pins("X")),
     ("we",0, Pins("X")),
+    ("rxinit_done",0,Pins("X")),
     
-    ("link_ready",0, Pins("X"))
+    ("link_ready",0, Pins("X")),
+    ("trans_en",0, Pins("X")),
+
+    ("write_clk", 0, 
+        Subsignal("p", Pins("G5"), IOStandard("DIFF_SSTL18_II")),
+        Subsignal("n", Pins("F5"), IOStandard("DIFF_SSTL18_II")),
+    ),
+
 
 ]
 

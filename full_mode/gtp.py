@@ -1,16 +1,10 @@
 
 from migen import *
 from migen.genlib.resetsync import AsyncResetSynchronizer
-
-from litex.soc.cores.code_8b10b import Encoder, Decoder
 from migen.genlib.cdc import *
-
 from gtp_7series_init import GTPTXInit, GTPRXInit
-
 import os
-import sys
-from TX.FIFO.asyncfifoDT import AsyncFIFOBuffered 
-from TX.tx import TX
+
 class GTPQuadPLL(Module):
     def __init__(self, refclk, refclk_freq, linerate):
         self.clk = Signal() 
@@ -128,24 +122,20 @@ class GTP(Module):
         self.drpdo = Signal(16)
         self.drpwe = Signal()
 
-        #TX signals
-        self.din=Signal(8)
-        self.dtin=Signal(2)
-        self.link_ready=Signal()
-        #FIFO signals
-        self.we=Signal()
-        self.re=Signal()
-        
+       
         #   #   #
-        tx=TX()
-        tx=ClockDomainsRenamer("tx")(tx)
-        fifo=AsyncFIFOBuffered(width=32,depth=32)
-        fifo=ClockDomainsRenamer({"read":"tx"})(fifo)
-        self.submodules+=[fifo,tx]
+        self.tx_data=Signal(40)
+        self.tx_k=Signal()
+        self.tx_init_done=Signal()
+
+        self.rx_data=Signal(40)
+        self.rxbytealigned=Signal()
+        self.rxcommmadet=Signal()
         
         tx_init = GTPTXInit(sys_clk_freq)
         rx_init = ClockDomainsRenamer("tx")(GTPRXInit(self.tx_clk_freq))
-        self.submodules += tx_init, rx_init
+        self.submodules += [tx_init]
+        self.submodules += [rx_init]
         # debug
         self.tx_init = tx_init
         self.rx_init = rx_init
@@ -163,14 +153,13 @@ class GTP(Module):
         self._txusrclk2=_txusrclk2=Signal()
         self.txoutclk = txoutclk=Signal()
         pll_fb2=Signal()
-        pll_lock=Signal()
+        self.pll_lock=pll_lock=Signal()
         self.specials += [
             Instance("PLLE2_BASE",
                      p_STARTUP_WAIT="FALSE", o_LOCKED=pll_lock,
-
                      
-                     p_REF_JITTER1=0.01, p_CLKIN1_PERIOD=3.33333333,
-                     p_CLKFBOUT_MULT=4, p_DIVCLK_DIVIDE=1,
+                     p_REF_JITTER1=0.01, p_CLKIN1_PERIOD=4.166667,
+                     p_CLKFBOUT_MULT=5, p_DIVCLK_DIVIDE=1,
                      i_CLKIN1=self.txoutclk, i_CLKFBIN=pll_fb2, o_CLKFBOUT=pll_fb2,
 
                      #240 MHz and 120 MHz required
@@ -181,12 +170,15 @@ class GTP(Module):
             Instance("BUFG", i_I=_txusrclk2, o_O=txusrclk2),
             Instance("BUFG", i_I=_txusrclk, o_O=txusrclk)
         ]
-        
+       
+        self.rxinit_done=Signal()
+
         self.comb += [
-        #self.plllock.eq(qpll.lock),
-        tx_init.plllock.eq(qpll.lock),
-        rx_init.plllock.eq(qpll.lock),
-        qpll.reset.eq(tx_init.pllreset)
+            self.rxinit_done.eq(rx_init.done),
+            tx_init.plllock.eq(qpll.lock),
+            rx_init.plllock.eq(qpll.lock),
+            qpll.reset.eq(tx_init.pllreset),
+            self.tx_init_done.eq(tx_init.done)
         ]
 
         # DRP Mux selected by rx_init
@@ -200,27 +192,7 @@ class GTP(Module):
     	]
         
         #TX signals 
-        self.comb+=[
-            fifo.din.eq(self.din),
-            fifo.dtin.eq(self.dtin),
-            fifo.we.eq(self.we),
-            fifo.re.eq(self.re),
-            If(~fifo.fifo.readable,
-                fifo.re.eq(0)
-            ).Else(fifo.re.eq(tx.fifo_re)),
-            tx.link_ready.eq(self.link_ready),
-            tx.fifo_empty.eq(~fifo.fifo.readable),
-            tx.reset.eq(self.re),
-            tx.tx_init_done.eq(tx_init.done),
-            tx.pll_lock.eq(pll_lock),
-            If((self.link_ready & fifo.fifo.readable), 
-                tx.data_in.eq(fifo.fifo.dout),   
-               
-            ),  
-            If((self.link_ready & fifo.fifo.readable), 
-                tx.data_type_in.eq(fifo.fifo.dtout),
-            )     
-        ]
+        
       
         assert qpll.config["linerate"] < 6.6e9
         # rxcdr_cfgs = {
@@ -241,7 +213,7 @@ class GTP(Module):
             Instance("GTPE2_CHANNEL",
                 i_GTRESETSEL=0,
                 i_RESETOVRD=0,
-                p_SIM_RESET_SPEEDUP="TRUE",
+                p_SIM_RESET_SPEEDUP="FALSE",
 
                 # DRP
                 i_DRPADDR=self.drpaddr,
@@ -312,17 +284,18 @@ class GTP(Module):
                 p_TXSYNC_OVRD=1,
 
                 #8b10b
-                i_TX8B10BEN=1,
-                i_TXCHARISK=tx.k,
-                i_TXCHARDISPMODE=0b000,
-                i_TXCHARDISPVAL=0b000,
+                i_TX8B10BEN=0,
                 
                 # TX data
                 p_TX_DATA_WIDTH=40,
-                i_TXDATA=tx.data_out,
+                i_TXCHARDISPMODE=Cat(self.tx_data[9],self.tx_data[19],
+                    self.tx_data[29],self.tx_data[39]),
+                i_TXCHARDISPVAL=Cat(self.tx_data[8],self.tx_data[18],
+                    self.tx_data[28],self.tx_data[38]),
+                i_TXDATA=Cat(self.tx_data[:8], self.tx_data[10:18],
+                    self.tx_data[20:28], self.tx_data[30:38]),
                 i_TXUSRCLK=txusrclk,
                 i_TXUSRCLK2=txusrclk2,
-\
                 # TX electrical
                 i_TXBUFDIFFCTRL=0b100,
                 i_TXDIFFCTRL=self.diffctrl,
@@ -366,8 +339,8 @@ class GTP(Module):
                 i_RXSYSCLKSEL=0b00,
                 i_RXOUTCLKSEL=0b010,
                 o_RXOUTCLK=self.rxoutclk,
-                i_RXUSRCLK=ClockSignal("rx"),
-                i_RXUSRCLK2=ClockSignal("rx"),
+                i_RXUSRCLK=txusrclk,
+                i_RXUSRCLK2=txusrclk2,
                 p_RXCDR_CFG=rxcdr_cfgs[qpll.config["d"]],
                 p_RXPI_CFG1=1,
                 p_RXPI_CFG2=1,
@@ -376,18 +349,43 @@ class GTP(Module):
                 p_CLK_CORRECT_USE="FALSE",
 
                 # RX data
+                i_RX8B10BEN=0,
                 p_RXBUF_EN="FALSE",
                 p_RXDLY_CFG=0x001f,
                 p_RXDLY_LCFG=0x030,
                 p_RXPHDLY_CFG=0x084020,
                 p_RXPH_CFG=0xc00002,
-                p_RX_DATA_WIDTH=20,
-                i_RXCOMMADETEN=1,
+                p_RX_DATA_WIDTH=40,
                 i_RXDLYBYPASS=0,
                 i_RXDDIEN=1,
-                #o_RXDISPERR=Cat(rx.rxdata[9], rx.rxdata[19]),
-                #o_RXCHARISK=Cat(rx.rxdata[8], rx.rxdata[18]),
-                #o_RXDATA=Cat(rx.rxdata[:8], rx.rxdata[10:18]),
+                o_RXDISPERR=Cat(self.rx_data[9], self.rx_data[19],
+                    self.rx_data[29], self.rx_data[39]),
+                o_RXCHARISK=Cat(self.rx_data[8], self.rx_data[18],
+                    self.rx_data[28], self.rx_data[38]),
+                o_RXDATA=Cat(self.rx_data[:8], self.rx_data[10:18],
+                     self.rx_data[20:28], self.rx_data[30:38]),
+
+                #Aligment
+                o_RXBYTEISALIGNED=self.rxbytealigned,
+                o_RXCOMMADET=self.rxcommmadet,
+                i_RXPCOMMAALIGNEN=1,
+                i_RXMCOMMAALIGNEN=1,    
+                i_RXCOMMADETEN=1,
+
+                p_ALIGN_COMMA_WORD=2,
+                p_ALIGN_COMMA_ENABLE=0b1111111111,
+                p_ALIGN_COMMA_DOUBLE="FALSE",
+                p_SHOW_REALIGN_COMMA="TRUE",
+                p_RXSLIDE_MODE="OFF",
+                p_RXSLIDE_AUTO_WAIT=7,
+                p_RX_SIG_VALID_DLY=10,
+                
+                p_ALIGN_MCOMMA_VALUE=0b1100000101, 
+                p_ALIGN_MCOMMA_DET="TRUE",
+                p_ALIGN_PCOMMA_VALUE=0b0011111010,
+                p_ALIGN_PCOMMA_DET="TRUE",
+
+
 
                 # Polarity
                 i_TXPOLARITY=self.tx_polarity,
@@ -406,6 +404,4 @@ class GTP(Module):
         self.clock_domains.cd_tx = ClockDomain()
         self.specials += Instance("BUFG", i_I=self.txusrclk2, o_O=self.cd_tx.clk)
 
-        #rx clocking
-        self.clock_domains.cd_rx = ClockDomain()
-        self.specials += Instance("BUFG", i_I=self.rxoutclk, o_O=self.cd_rx.clk)
+        

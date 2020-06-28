@@ -2,88 +2,138 @@ import os
 import sys
 from migen import *
 from migen.genlib.io import CRG
-
 from gtp import GTPQuadPLL, GTP
 from daphne_platforms import Platform
-
+from tx import TX
+from rx import RX
+from asyncfifoDT import AsyncFIFO
+from alignment_corrector import Alignment_Corrector
+from memory import mem
 class FullModeSim(Module):
     def __init__(self, platform):
-        self.din=Signal(8) #data to write in the fifo
-        self.dtin=Signal(2) #data type to write in the fifo
-        self.we=Signal() #fifo write enable
-        self.link_ready=Signal() #starts transmision
+        """
+        we: Write button. When is asserted, all data and data type from 
+        memory is written into the FIFO. 
+        link_ready: When is asserted, the transmision starts.
+        trans_en: When is asserted, the transmision of data received in
+        RX to the PC via UART starts.
+        """
+        self.we=Signal() 
+        self.link_ready=Signal()
+        self.trans_en=Signal() 
         #   #   #
 
         write_clk = Signal() #clock that drives fifo writing 
-        write_clk100 = Signal()
-        write_clk100_pads = platform.request("clk0") #differential clock
+        write_clk_bufg = Signal()
+        write_clk_pads = platform.request("write_clk") #differential clock
         self.specials += [
-            Instance("IBUFDS_GTE2",
-                i_CEB=0,
-                i_I=write_clk100_pads.clk_p,
-                i_IB=write_clk100_pads.clk_n,
-                o_O=write_clk100), 
-            Instance("BUFG", i_I=write_clk100, o_O=write_clk)
+            Instance("IBUFGDS",
+                i_I=write_clk_pads.p,
+                i_IB=write_clk_pads.n,
+                o_O=write_clk_bufg), 
+            Instance("BUFG", i_I=write_clk_bufg, o_O=write_clk)
         ]
         self.clock_domains.cd_write=ClockDomain(name="write") #fifo writing clock domain
         self.comb += [
             self.cd_write.clk.eq(write_clk),
         ]        
-
-        sys_clk = Signal() 
-        self.submodules.crg = CRG(sys_clk)
-        refclk625_platform = Signal()
-        sys_clk_freq=62.5e6
-        clk62_5=Signal()
-        clk62_5 = platform.request("clk62_5") #single clock, source
-        self.specials+=[
-            Instance("BUFG", i_I=clk62_5, o_O=sys_clk)
-        ]    
-
-       
-
-        refclk = Signal() #300 MHz QuadPLL refclk 
-        pll_fb = Signal()
-        self.specials += [
-            Instance("PLLE2_BASE",
-                     p_STARTUP_WAIT="FALSE", #o_LOCKED=,
-
-                     # VCO @ 1.5 GHz
-                     p_REF_JITTER1=0.01, p_CLKIN1_PERIOD=16.0,
-                     p_CLKFBOUT_MULT=24, p_DIVCLK_DIVIDE=1,
-                     i_CLKIN1=sys_clk, i_CLKFBIN=pll_fb, o_CLKFBOUT=pll_fb,
-
-                     # 
-                     p_CLKOUT0_DIVIDE=5, p_CLKOUT0_PHASE=0.0, o_CLKOUT0=refclk
-            ),
+        
+        gtp_clk=Signal() #gtp reference clk
+        gtp_clk_bufg=Signal()
+        gtp_clk_freq=240e6
+        gtp_clk_pads = platform.request("gtp_clk")
+        self.specials +=[
+            Instance("IBUFDS_GTE2",
+                    i_CEB=0,
+                    i_I=gtp_clk_pads.p,
+                    i_IB=gtp_clk_pads.n,
+                    o_O=gtp_clk_bufg),
+            Instance("BUFG", i_I=gtp_clk_bufg, o_O=gtp_clk)
         ]
-        gtp_refclk=Signal()
-        gtp_refclk=platform.request("gtp_refclk") #to txoutclk
-
-        self.comb+=[gtp_refclk.p.eq(refclk), gtp_refclk.n.eq(~refclk)]
-
-        qpll = GTPQuadPLL(refclk, 300e6, 4.8e9)
+        self.submodules.crg = CRG(gtp_clk) #tx_init clock region
+        qpll = GTPQuadPLL(gtp_clk, gtp_clk_freq, 4.8e9)
         print(qpll)
         self.submodules += qpll
 
         tx_pads = platform.request("gtp_tx")
         rx_pads = platform.request("gtp_rx")
-        gtp = GTP(qpll, tx_pads, rx_pads, sys_clk_freq)
+        gtp = GTP(qpll, tx_pads, rx_pads, gtp_clk_freq)
         self.submodules += gtp
-
-       
-        self.din=platform.request("din")
-        self.dtin=platform.request("dtin")
+  
+        
         self.we=platform.request("we")
         self.link_ready=platform.request("link_ready")
-        zeros=Signal(24) #completes the remaining 24 bits 
+        self.trans_en=platform.request("trans_en")
         
+        tx=TX()
+        tx=ClockDomainsRenamer("tx")(tx)
+        rx=RX()
+        rx=ClockDomainsRenamer("tx")(rx)
+        fifo=AsyncFIFO(width=32,depth=32)
+        fifo=ClockDomainsRenamer({"read":"tx"})(fifo)
+        corrector=ClockDomainsRenamer("tx")(Alignment_Corrector())
+        memory=mem()
+        memory=ClockDomainsRenamer("write")(memory)
+        self.submodules+=[fifo,tx,corrector,rx,memory]
+
+        
+        self.rxinit_done=Signal()  
+        #rx_init_done signal goes to tb only for simulation purposes
+        self.rxinit_done=platform.request("rxinit_done")    
+        
+        index=Signal(5) #Memory index
+        write_fifo=Signal() #fifo write enable
+        #FSM to control the FIFO writing process
+        self.submodules.write_fifo_fsm=FSM(reset_state="INIT")
+        self.write_fifo=ClockDomainsRenamer("write")(self.write_fifo_fsm)
+        self.write_fifo_fsm.act("INIT",
+            If(self.we,
+                NextValue(index,1),
+                NextState("WRITING"),
+                NextValue(write_fifo,1),
+            )
+        )
+        self.write_fifo_fsm.act("WRITING",
+            
+            NextValue(index,index+1),
+            If(index==(memory.n_value), #Last word reached
+                NextValue(index,memory.n_value),
+                NextState("WRITING_EOP"),
+                NextValue(write_fifo,0)
+            )    
+        )
+        self.write_fifo_fsm.act("WRITING_EOP",
+            NextState("IDLE"),
+            
+        )
+        self.write_fifo_fsm.act("IDLE",
+            If(~self.we, #Process starts again
+                NextState("INIT")
+            )
+        )
         self.comb+=[
-            gtp.we.eq(self.we),
-            gtp.link_ready.eq(self.link_ready),
-            gtp.din.eq(Cat(self.din.a,self.din.b,self.din.c,
-                self.din.d,self.din.e,self.din.f,self.din.g,self.din.h,zeros)),
-            gtp.dtin.eq(Cat(self.dtin.a, self.dtin.b)),
+            memory.index.eq(index),
+            fifo.din.eq(memory.data_out),
+            fifo.dtin.eq(memory.type_out),
+            fifo.re.eq(tx.fifo_re),
+            fifo.we.eq(write_fifo),
+            tx.link_ready.eq(self.link_ready),
+            tx.fifo_empty.eq(~fifo.readable),
+            tx.tx_init_done.eq(gtp.tx_init_done),
+            tx.pll_lock.eq(gtp.pll_lock),
+            If((self.link_ready & fifo.readable), 
+                tx.data_type_in.eq(fifo.dtout),
+                tx.data_in.eq(fifo.dout), 
+            ),
+            gtp.tx_data.eq(tx.data_out),
+            corrector.din.eq(gtp.rx_data),
+            corrector.aligned.eq(gtp.rxbytealigned),
+            rx.data_in.eq(corrector.dout),
+            rx.rx_init_done.eq(gtp.rxinit_done),
+            rx.pll_lock.eq(gtp.pll_lock),
+            rx.trans_en.eq(self.trans_en),
+            self.rxinit_done.eq(gtp.tx_init_done)
+            
         ]
 
 def generate_top():
@@ -98,111 +148,77 @@ def generate_top_tb():
 
 module top_tb();
 
-reg clk0;
-initial clk0 = 1'b1;
-always #5 clk0 = ~clk0;
+reg write_clk;
+initial write_clk = 1'b1;
+always #1.25 write_clk = ~write_clk; //1.25 is half period of 400 MHz write clk
 
-reg clk62_5;
-initial clk62_5 = 1'b1;
-always #8 clk62_5 = ~clk62_5;
+reg gtp_clk;
+initial gtp_clk = 1'b1;
+always #2.08333 gtp_clk = ~gtp_clk; //2.08333 is half period of 240 MHz gtp clk
 
-integer period =10;
+real period =2.5; //400 MHz period
 
-reg[7:0] value;
-initial value='b0;    
-reg[1:0] type;
-initial type=2'b0;    
 reg link_ready;
 initial link_ready=0;
 reg we;
-initial we=0;
+reg trans_en;
+initial we='b0;
 wire gtp_p;
 wire gtp_n;
+
+wire rxinit_done;
 
 top dut (
     .gtp_tx_p(gtp_p),
     .gtp_tx_n(gtp_n),
     .gtp_rx_p(gtp_p),
     .gtp_rx_n(gtp_n),
-    .clk0_clk_p(clk0),
-    .clk0_clk_n(~clk0),
-    .clk62_5(clk62_5),
-    .din_a(value[0]),
-    .din_b(value[1]),
-    .din_c(value[2]),
-    .din_d(value[3]),
-    .din_e(value[4]),
-    .din_f(value[5]),
-    .din_g(value[6]),
-    .din_h(value[7]),
-    .dtin_a(type[0]),
-    .dtin_b(type[1]),
+    .write_clk_p(write_clk),
+    .write_clk_n(~write_clk),
+    .gtp_clk_p(gtp_clk),
+    .gtp_clk_n(~gtp_clk),
     .we(we),
-    .link_ready(link_ready)
+    .link_ready(link_ready),
+    .trans_en(trans_en),
+    .rxinit_done(rxinit_done)
+    
 );
 
+
 always begin 
-    for (integer i=0;i<=2500;i=i+1) begin
-        #period;
-        
-    end
-    
-    we=1'b1;
-    #period;    
-
-    type=2'b01;
-    value=8'hAA;
-    we=1'b1;
-    #period;
-
-    type=2'b00;
-    value='h1A;
-    we=1'b1;
-    #period;
-
-    type=2'b00;
-    value='h1B;
-    we=1'b1;
-    #period;
-
-    type=2'b00;
-    value='h1C;
-    we=1'b1;
-    #period;
-
-    type=2'b00;
-    value='h1D;
-    we=1'b1;
-    #period;
-
-    type=2'b00;
-    value='h1F;
-    we=1'b1;
-    #period;
-
-    type=2'b00;
-    value='h2A;
-    we=1'b1;
-    #period;
-
-    type=2'b00;
-    value='h2B;
-    we=1'b1;
-    #period;
-
-
-    type=2'b10;
-    value='h2C;
-    we=1'b1;
-    #period;
-
-    
-    for (integer i=0;i<=500;i=i+1) begin
-        we=1'b0;
-        link_ready=1'b1;
+    //Waits signals initialization
+    for (integer i=0;i<=400;i=i+1) begin
         #period;
     end
-
+    //Waits rx initialization (tx is always(?) initialized first)
+    while(!rxinit_done) begin
+        #period;
+    end
+    //Starts transmision. It will send IDLE because FIFO is empty yet
+    link_ready=1'b1; 
+    for (integer i=0;i<=100;i=i+1) begin
+        #period;
+    end
+    
+    //The writing process starts
+    we=1'b1;
+    for (integer i=0;i<=200;i=i+1) begin
+        #period;
+    end
+    //The transmision via UART starts
+    for (integer i=0;i<=1000;i=i+1) begin
+        trans_en=1'b1;
+        #period;
+    end
+    //The writing process starts again
+    we=1'b0;
+    for (integer i=0;i<=10;i=i+1) begin
+        #period;
+    end
+    we=1'b1;
+    for (integer i=0;i<=1000;i=i+1) begin
+        #period;
+    end
 end
 endmodule""")
     f.close()
