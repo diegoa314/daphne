@@ -12,7 +12,7 @@ class Transmitter32b(Module):
 		self.fifoEmpty=Signal()
 		#  #  #
 		self.submodules.trans_fsm=FSM(reset_state="IDLE")
-		transmitter=tx(freq=120000000, baud_rate=4000000, n_bits=8) 
+		transmitter=tx(freq=120000000, baud_rate=4000000, n_bits=8)
 		self.byte_cnt=Signal(4) 
 		self.submodules+=transmitter
 		self.comb+=self.tx_serial.eq(transmitter.tx_serial)

@@ -15,61 +15,55 @@ class TX(Module):
 
 		#  #  #
 		
-		encoder=Encoder(4)
+		encoder=Encoder(4,lsb_first=True)
 		crc_encoder=TxParallelCrcGenerator(data_width=32, crc_width=20, polynomial=0xc1acf,initial=0xfffff)
 	
-		fsm=Fsm()
-		self.submodules+=[encoder, crc_encoder, fsm]
+		stream_controller=Fsm()
+		self.submodules+=[encoder, crc_encoder, stream_controller]
 		self.comb+=[
-			fsm.link_ready.eq(self.link_ready),
-			fsm.fifo_empty.eq(self.fifo_empty),
-			fsm.data_type.eq(self.data_type_in),
-			fsm.system_ready.eq(self.tx_init_done & self.pll_lock),
-			self.fifo_re.eq(fsm.fifo_re),
-			If(self.data_type_in!=3, #Not ignored word
-				crc_encoder.i_data_strobe.eq(fsm.strobe_crc)
+			stream_controller.link_ready.eq(self.link_ready),
+			stream_controller.fifo_empty.eq(self.fifo_empty),
+			stream_controller.data_type.eq(self.data_type_in),
+			stream_controller.system_ready.eq(self.tx_init_done & self.pll_lock),
+			self.fifo_re.eq(stream_controller.fifo_re),
+			If(self.data_type_in!=3,
+				crc_encoder.i_data_strobe.eq(stream_controller.strobe_crc)
 			),
-			crc_encoder.reset.eq(fsm.reset_crc),
-			If(fsm.encoder_ready,
+			crc_encoder.reset.eq(stream_controller.reset_crc),
+			If(stream_controller.encoder_ready,
 				crc_encoder.i_data_payload.eq(self.data_in),
 			),
-			If((fsm.encoder_ready),
+			If((stream_controller.encoder_ready),
 				self.data_out.eq(Cat(encoder.output[0],encoder.output[1],
 					encoder.output[2],encoder.output[3])),
 			).Else(self.data_out.eq(0)),
 		]
 		
 		self.sync+=[ 
-			If((fsm.fifo_ready),
-				
-				encoder.d[0].eq(self.data_in[0:8]),
-				encoder.d[1].eq(self.data_in[8:16]),
-				encoder.d[2].eq(self.data_in[16:24]),
-				encoder.d[3].eq(self.data_in[24:32]),
-
-			),
-			If(fsm.sop, 
-				encoder.d[0].eq(0x3C),
-				encoder.k[0].eq(1),
-				encoder.d[1].eq(0),
-				encoder.d[2].eq(0),
-				encoder.d[3].eq(0)  
-			),
-			If(fsm.idle,
+			If(stream_controller.idle,
 				encoder.d[0].eq(0xBC),
 				encoder.k[0].eq(1),
 				encoder.d[1].eq(0),
 				encoder.d[2].eq(0),
 				encoder.d[3].eq(0)
-			),
-			If(fsm.ign,
-				encoder.d[0].eq(0x5C), #Not specified in FullMode paper
+			).Elif(stream_controller.sop, 
+				encoder.d[0].eq(0x3C),
+				encoder.k[0].eq(1),
+				encoder.d[1].eq(0),
+				encoder.d[2].eq(0),
+				encoder.d[3].eq(0)  
+			).Elif((stream_controller.intermediate),
+				encoder.d[0].eq(self.data_in[0:8]),
+				encoder.d[1].eq(self.data_in[8:16]),
+				encoder.d[2].eq(self.data_in[16:24]),
+				encoder.d[3].eq(self.data_in[24:32]),
+			).Elif(stream_controller.ign,
+				encoder.d[0].eq(0x5C),
 				encoder.k[0].eq(1),
 				encoder.d[1].eq(0),
 				encoder.d[2].eq(0),
 				encoder.d[3].eq(0)
-			),
-			If(fsm.eop,                  
+			).Elif(stream_controller.eop,                  
 				encoder.d[0].eq(0xDC), 
 				encoder.k[0].eq(1),
 				encoder.d[1].eq(crc_encoder.o_crc[0:8]),
@@ -77,15 +71,11 @@ class TX(Module):
 				encoder.d[3].eq(crc_encoder.o_crc[16:])
 				
 			),
-			If((~fsm.idle)&(~fsm.eop)&(~fsm.sop)&(~fsm.ign),
+			If((~stream_controller.idle)&(~stream_controller.eop)&(~stream_controller.sop)&(~stream_controller.ign),
 				encoder.k[0].eq(0)	
 			),
 			encoder.k[1].eq(0),
 			encoder.k[2].eq(0),
-			encoder.k[3].eq(0),
+			encoder.k[3].eq(0)
 		]		
 
-	yield
-
-dut=TX()
-run_simulation(dut,tb(dut),vcd_name="prueba_tb.vcd")

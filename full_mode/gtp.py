@@ -190,16 +190,10 @@ class GTP(Module):
     	rx_init.drprdy.eq(self.drprdy)
     	]
         
-        #TX signals 
         
       
         assert qpll.config["linerate"] < 6.6e9
-        # rxcdr_cfgs = {
-        #      1 : 0x0001107FE206021041010,
-        #      2 : 0x0001107FE206021081010,
-        #      4 : 0x0001107FE086021101010,
-        #      8 : 0x0001107FE086021101010
-        # }
+       
         rxcdr_cfgs = {
             1 : 0x0000107FE406001041010,
             2 : 0x0000107FE206001041010,
@@ -379,9 +373,11 @@ class GTP(Module):
                 p_RXSLIDE_AUTO_WAIT=7,
                 p_RX_SIG_VALID_DLY=10,
                 
-                p_ALIGN_MCOMMA_VALUE=0b1100000101, 
+                #p_ALIGN_MCOMMA_VALUE=0b1100000101, 
+                p_ALIGN_MCOMMA_VALUE=0b1010000011, 
                 p_ALIGN_MCOMMA_DET="TRUE",
-                p_ALIGN_PCOMMA_VALUE=0b0011111010,
+                #p_ALIGN_PCOMMA_VALUE=0b0011111010,
+                p_ALIGN_PCOMMA_VALUE=0b0101111100,
                 p_ALIGN_PCOMMA_DET="TRUE",
 
 
